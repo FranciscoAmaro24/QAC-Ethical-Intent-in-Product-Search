@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: "How Query Auto-Completion Shapes Ethical Intent in Product Search"
+message: "If you use this software, please cite the associated paper."
+type: software
+authors:
+  - given-names: Francisco
+    family-names: Amaro
+    email: fdmamaro24@gmail.com
+repository-code: "https://github.com/Hacking-Sustainably/dev"
+license: MIT
