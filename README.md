@@ -1,122 +1,30 @@
 # Ethical Intent in Online Product Search: Evidence from Query Auto-Completion
 
-Replication package for the CHIIR '26 paper analysing ethical intent signals in Amazon search auto-complete data.
-
-## Repository Structure
-
-```
-submission/
-├── src/
-│   ├── download_amazon_qac.py      # Step 1: Download dataset from HuggingFace
-│   ├── subsample_5pct_filtered.py   # Step 2: Create 5% ethics-filtered sample
-│   ├── ethical_analysis.py          # Step 3: Keyword extraction & transition classification
-│   ├── send_query_llm.py           # Step 4: LLM product domain classification
-│   ├── qac_domain_stats.py         # Step 5: Domain × category transition statistics
-│   └── ethics_results.py           # Step 6: Generate all tables and figures
-├── figures/                         # Output figures (PDF + PNG)
-├── ethics_results.ipynb             # Interactive notebook for all results
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
+Query auto-completion (QAC) shapes what consumers search for, yet its interaction with ethically motivated queries such as organic, cruelty-free, fair-trade have not been studied. We analyse a 5% sample of the [AmazonQAC](https://huggingface.co/datasets/amazon/AmazonQAC) dataset (~135k ethical queries) and classify each keyword occurrence as **Retained**, **Dropped**, or **Added** by the auto-complete system across five ethical-intent categories. An LLM then maps every query to one of 13 product domains for cross-domain analysis.
 
 ## Pipeline
 
-Run each step from the repository root. All scripts auto-detect their working directory.
+Run steps 1–5 in order, then open the notebook to reproduce all tables and figures.
 
-### Step 1 — Download and sample the dataset
+| Step | Script | Output |
+|------|--------|--------|
+| 1 | `src/download_amazon_qac.py` | 10% sample parquet from AmazonQAC (~395M → ~39.5M rows) |
+| 2 | `src/subsample_5pct_filtered.py` | 5% ethics-filtered CSV (~1.6M rows) |
+| 3 | `src/ethical_analysis.py` | Per-token and per-query keyword match CSVs |
+| 4 | `src/send_query_llm.py` | Product-domain classification via Qwen 2.5-3B (MLX) |
+| 5 | `src/qac_domain_stats.py` | Domain × category transition statistics |
+| — | `ethics_results.ipynb` | All paper tables and figures |
 
-```bash
-python src/download_amazon_qac.py
-```
+Step 4 requires Apple Silicon + MLX (~8 h on M-series, 16 GB). All other steps run on any platform. See each script's docstring for CLI flags.
 
-Streams the [AmazonQAC](https://huggingface.co/datasets/amazon/AmazonQAC) train split (~395M rows) from HuggingFace and writes a 10% random sample as `data/amazon_qac_sample_10pct.parquet`. Requires ~5 GB disk and a stable internet connection; runtime depends on download speed.
-
-### Step 2 — Create the 5% ethics-filtered sample
-
-```bash
-python src/subsample_5pct_filtered.py
-```
-
-Reads the 10% parquet in row-group batches, samples 50% of each batch (= 5% of full dataset), filters for rows containing at least one keyword from the ethical vocabulary, explodes the prefix list, and writes `amazon_qac_5pct_ethics_filtered.csv` (1,572,622 rows).
-
-### Step 3 — Keyword extraction and transition classification
-
-```bash
-python src/ethical_analysis.py --csv amazon_qac_5pct_ethics_filtered.csv
-```
-
-Scans each query's prefix and final search term against 89 regex patterns across five ethical-intent categories. Classifies each keyword occurrence as Retained (T→T), Dropped (T→F), or Added (F→T). Outputs:
-
-- `ethical_data_final_5pct.csv` — per-token keyword matches (136,500 rows)
-- `ethical_logical_5pct.csv` — per-query boolean flags (135,297 rows)
-
-### Step 4 — LLM product domain classification
-
-```bash
-python src/send_query_llm.py
-```
-
-Classifies each ethical query into one of 13 product domains using Qwen2.5-3B-Instruct (4-bit) via Apple MLX with 3 parallel workers. Runtime: ~8 hours on Apple Silicon (M-series, 16 GB). Outputs `ethics_classified_5pct.csv`.
-
-> **Note:** This step requires Apple Silicon hardware with MLX support. For other platforms, substitute with any instruction-following LLM via the same prompt template (see paper for details).
-
-### Step 5 — Domain transition statistics
-
-```bash
-python src/qac_domain_stats.py
-```
-
-Cross-tabulates ethics category × product domain × transition type (Retained / Dropped / Added). Outputs `qac_domain_transitions.csv` (195 rows).
-
-### Step 6 — Generate tables and figures
-
-```bash
-python src/ethics_results.py
-```
-
-Produces all paper outputs:
-
-| Output | Description |
-|--------|-------------|
-| `table2_qac_conditions.csv` | QAC interaction conditions per category |
-| `figures/figure2_domain_shares.pdf` | Ethical intent by product domain |
-| `figures/figure3_qac_probability.pdf` | QAC addition probability by query length |
-| `figures/figure4_token_transitions.pdf` | Per-token Retained / Dropped / Added |
-| `figures/figure5_domain_heatmap.pdf` | Domain × category heatmap |
-
-### Interactive notebook
-
-```bash
-jupyter notebook ethics_results.ipynb
-```
-
-Contains all tables, figures, statistical significance tests (chi-square, Cramér's V, logistic regression, proportion z-tests), and a LaTeX vocabulary table generator.
-
-## Data
-
-The [AmazonQAC dataset](https://huggingface.co/datasets/amazon/AmazonQAC) is publicly available on HuggingFace. The pipeline downloads it automatically in Step 1. Intermediate data files are excluded from the repository via `.gitignore` and are regenerated by the pipeline.
-
-## Requirements
-
-- Python ≥ 3.10
-- Apple Silicon (M-series) for the LLM step; all other steps run on any platform
-- ~10 GB disk for intermediate data files
+## Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
+Python ≥ 3.10. Data files are downloaded in Step 1 and excluded from the repo via `.gitignore`.
+
 ## Ethical Vocabulary
 
-89 seed terms across five categories:
-
-| Category | Terms |
-|----------|-------|
-| Environmental Sustainability | 20 terms (organic, eco-friendly, recyclable, …) |
-| Fair Trade, Labour & Human Rights | 19 terms (fair trade, ethically sourced, …) |
-| Animal Welfare | 15 terms (cruelty-free, vegan, free-range, …) |
-| Privacy & Data Ethics | 18 terms (privacy, encrypted, open-source, …) |
-| Accessibility & Inclusion | 17 terms (accessible, braille, ergonomic, …) |
-
-See the paper or `ethical_analysis.py` for the complete list.
+89 regex terms across 5 categories: Environmental Sustainability (20), Fair Trade & Labour (19), Animal Welfare (15), Privacy & Data Ethics (18), Accessibility & Inclusion (17). Full list in `src/ethical_analysis.py`.
