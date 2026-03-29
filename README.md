@@ -1,4 +1,4 @@
-# Ethical Intent in Online Product Search: Evidence from Query Auto-Completion
+# How Query Auto-Completion Shapes Ethical Intent in Product Search
 
 Query auto-completion (QAC) shapes what consumers search for, yet its interaction with ethically motivated queries such as organic, cruelty-free, fair-trade have not been studied. We analyse a 5% sample of the [AmazonQAC](https://huggingface.co/datasets/amazon/AmazonQAC) dataset (~135k ethical queries) and classify each keyword occurrence as **Retained**, **Dropped**, or **Added** by the auto-complete system across five ethical-intent categories. An LLM then maps every query to one of 13 product domains for cross-domain analysis.
 
