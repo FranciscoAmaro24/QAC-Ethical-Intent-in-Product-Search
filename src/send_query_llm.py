@@ -1,27 +1,22 @@
 """
-Product-domain classification of ethical search queries via LLM.
+Classify every ethical query into one of 13 product domains with a local
+Qwen 2.5-3B model (MLX, Apple Silicon). Each worker process loads its own copy
+of the model; three workers fit in 16 GB of unified memory.
 
-Uses MLX (Apple Silicon GPU) with parallel worker processes. Each worker
-loads its own copy of a quantised Qwen-2.5-3B model and classifies queries
-one at a time.  Three workers fit comfortably in 16 GB unified memory without
-thermal throttling.
+    python src/send_query_llm.py [--workers 3] [--resume]
 
-Usage
------
-    python send_query_llm.py                # 3 workers (default)
-    python send_query_llm.py --workers 2
-    python send_query_llm.py --resume       # continue from checkpoint
+Output: data/ethics_classified_5pct.csv
 """
 
-import os, sys, time, argparse, multiprocessing as mp
+import os, sys, time, queue, argparse, multiprocessing as mp
 from datetime import datetime
 import pandas as pd
 
-DIR        = os.path.dirname(os.path.abspath(__file__))
-INPUT_CSV  = os.path.join(DIR, "ethical_logical_5pct.csv")
-OUTPUT_CSV = os.path.join(DIR, "ethics_classified_5pct.csv")
-CHECKPOINT = os.path.join(DIR, "ethics_classified_5pct.checkpoint.csv")
-LOG_FILE   = os.path.join(DIR, "llm_run.log")
+DATA_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "data")
+INPUT_CSV  = os.path.join(DATA_DIR, "ethical_logical_5pct.csv")
+OUTPUT_CSV = os.path.join(DATA_DIR, "ethics_classified_5pct.csv")
+CHECKPOINT = os.path.join(DATA_DIR, "ethics_classified_5pct.checkpoint.csv")
+LOG_FILE   = os.path.join(DATA_DIR, "llm_run.log")
 
 MODEL_NAME = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 
@@ -57,7 +52,7 @@ SYSTEM_PROMPT = (
     "natural cat litter → Home Garden and DIY\n"
 )
 
-# Common LLM paraphrases mapped back to canonical domain names.
+# Common model paraphrases mapped back to a domain
 ALIASES = {
     "cosmetics": "Health and Beauty", "beauty": "Health and Beauty",
     "makeup": "Health and Beauty", "personal care": "Health and Beauty",
@@ -108,13 +103,9 @@ ALIASES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 class Tee:
-    """Duplicate writes to both a terminal stream and a log file.
-    Fork-safe: each process inherits the open fd."""
+    """Write to the terminal and, timestamped, to the log file."""
     def __init__(self, log_path, stream):
         self._stream = stream
         self._file = open(log_path, "a", encoding="utf-8")
@@ -135,7 +126,7 @@ class Tee:
 
 
 def match_domain(raw):
-    """Normalise an LLM response to a canonical domain name, or None."""
+    """Map a model response to a domain name, or None."""
     s = raw.strip().rstrip(".")
     if s in VALID_SET:
         return s
@@ -149,8 +140,7 @@ def match_domain(raw):
     return ALIASES.get(sl)
 
 
-def _save(queries_df, done, path):
-    """Write classified results to CSV."""
+def save(queries_df, done, path):
     keep = (["query_id", "session_id", "final_search_term", "popularity"]
             + [f"{c}_prefix" for c in ETHICS_CATEGORIES]
             + [f"{c}_final"  for c in ETHICS_CATEGORIES])
@@ -160,12 +150,8 @@ def _save(queries_df, done, path):
     out.to_csv(path, index=False)
 
 
-# ---------------------------------------------------------------------------
-# Worker process
-# ---------------------------------------------------------------------------
 
 def worker_fn(worker_id, tasks, result_queue):
-    """Load model and classify each query in *tasks*."""
     from mlx_lm import load, generate
 
     model, tokenizer = load(MODEL_NAME)
@@ -185,9 +171,6 @@ def worker_fn(worker_id, tasks, result_queue):
         result_queue.put((query_id, domain))
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -210,45 +193,33 @@ def main():
     total = len(queries_df)
     print(f"Queries to classify: {total:,}")
 
-    # Resume support
+    # The checkpoint lists every query; only those with a label are done
     done = {}
-    start = 0
     if args.resume and os.path.exists(CHECKPOINT):
-        ckpt = pd.read_csv(CHECKPOINT)
+        ckpt = pd.read_csv(CHECKPOINT).dropna(subset=["product_domain"])
         done = dict(zip(ckpt["query_id"], ckpt["product_domain"]))
-        start = len(done)
-        print(f"Resuming from checkpoint: {start:,} already done")
+        print(f"Resuming from checkpoint: {len(done):,} already done")
+    start = len(done)
 
-    remaining = queries_df.iloc[start:].reset_index(drop=True)
+    remaining = queries_df[~queries_df["query_id"].isin(done)]
     n = len(remaining)
     print(f"Remaining: {n:,}\n")
-
     if n == 0:
-        print("Nothing to do.")
         return
 
-    # Build task list
-    tasks = []
-    for i, row in enumerate(remaining.itertuples()):
-        q = row.final_search_term if pd.notna(row.final_search_term) else ""
-        tasks.append((i + start + 1, row.query_id, q))
-
-    # Round-robin split across workers
-    worker_tasks = [[] for _ in range(args.workers)]
-    for i, task in enumerate(tasks):
-        worker_tasks[i % args.workers].append(task)
+    tasks = [(start + i + 1, row.query_id,
+              row.final_search_term if pd.notna(row.final_search_term) else "")
+             for i, row in enumerate(remaining.itertuples())]
+    worker_tasks = [tasks[w::args.workers] for w in range(args.workers)]
 
     result_queue = mp.Queue()
-    processes = []
+    processes = [mp.Process(target=worker_fn, args=(w, worker_tasks[w], result_queue))
+                 for w in range(args.workers)]
     t0 = time.time()
-
-    for wid in range(args.workers):
-        p = mp.Process(target=worker_fn,
-                       args=(wid, worker_tasks[wid], result_queue))
+    for p in processes:
         p.start()
-        processes.append(p)
 
-    # Collect results with periodic checkpointing
+    # Collect results, checkpointing every 500
     collected = 0
     while collected < n:
         try:
@@ -263,17 +234,16 @@ def main():
                 print(f"\n  {collected + start:,}/{total:,}  "
                       f"{elapsed:.0f}s  {rate:.1f} q/s  "
                       f"ETA {eta/3600:.1f}h\n", flush=True)
-                _save(queries_df, done, CHECKPOINT)
-        except Exception:
-            alive = [p for p in processes if p.is_alive()]
-            if not alive:
+                save(queries_df, done, CHECKPOINT)
+        except queue.Empty:
+            if not any(p.is_alive() for p in processes):
                 print(f"All workers exited after {collected} results.")
                 break
 
     for p in processes:
         p.join()
 
-    _save(queries_df, done, args.output)
+    save(queries_df, done, args.output)
     if os.path.exists(CHECKPOINT):
         os.remove(CHECKPOINT)
 
